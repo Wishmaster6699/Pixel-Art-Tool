@@ -354,7 +354,7 @@
 <body>
     <div class="container">
         <h1>Pixel Art Tool v2.0</h1>
-        <div class="version">Complete Edition - All tools in one place</div>
+        <div class="version">Complete Edition - All tools in one place | Now with ZIP export!</div>
 
         <!-- Tab Navigation -->
         <div class="tabs">
@@ -1464,16 +1464,106 @@
         }
 
         async function downloadAsZip(files, zipName) {
-            // Minimal ZIP implementation
-            alert(`Preparing ${files.length} files for download.\n\nNote: Files will download individually since this is a zero-dependency version.\n\nFor ZIP support, we can add JSZip library (~100KB).`);
+            // Lightweight ZIP file creator
+            const zipParts = [];
+            const centralDirectory = [];
+            let offset = 0;
 
             for (const { filename, blob } of files) {
-                const link = document.createElement('a');
-                link.download = filename;
-                link.href = URL.createObjectURL(blob);
-                link.click();
-                await new Promise(resolve => setTimeout(resolve, 100));
+                const fileData = new Uint8Array(await blob.arrayBuffer());
+                const fileName = new TextEncoder().encode(filename);
+
+                // Local file header
+                const localHeader = new Uint8Array(30 + fileName.length);
+                const view = new DataView(localHeader.buffer);
+
+                view.setUint32(0, 0x04034b50, true); // Local file header signature
+                view.setUint16(4, 20, true); // Version needed to extract
+                view.setUint16(6, 0, true); // General purpose bit flag
+                view.setUint16(8, 0, true); // Compression method (0 = uncompressed)
+                view.setUint16(10, 0, true); // File last modification time
+                view.setUint16(12, 0, true); // File last modification date
+                view.setUint32(14, crc32(fileData), true); // CRC-32
+                view.setUint32(18, fileData.length, true); // Compressed size
+                view.setUint32(22, fileData.length, true); // Uncompressed size
+                view.setUint16(26, fileName.length, true); // File name length
+                view.setUint16(28, 0, true); // Extra field length
+
+                localHeader.set(fileName, 30);
+
+                zipParts.push(localHeader);
+                zipParts.push(fileData);
+
+                // Central directory header
+                const centralHeader = new Uint8Array(46 + fileName.length);
+                const cdView = new DataView(centralHeader.buffer);
+
+                cdView.setUint32(0, 0x02014b50, true); // Central directory file header signature
+                cdView.setUint16(4, 20, true); // Version made by
+                cdView.setUint16(6, 20, true); // Version needed to extract
+                cdView.setUint16(8, 0, true); // General purpose bit flag
+                cdView.setUint16(10, 0, true); // Compression method
+                cdView.setUint16(12, 0, true); // File last modification time
+                cdView.setUint16(14, 0, true); // File last modification date
+                cdView.setUint32(16, crc32(fileData), true); // CRC-32
+                cdView.setUint32(20, fileData.length, true); // Compressed size
+                cdView.setUint32(24, fileData.length, true); // Uncompressed size
+                cdView.setUint16(28, fileName.length, true); // File name length
+                cdView.setUint16(30, 0, true); // Extra field length
+                cdView.setUint16(32, 0, true); // File comment length
+                cdView.setUint16(34, 0, true); // Disk number start
+                cdView.setUint16(36, 0, true); // Internal file attributes
+                cdView.setUint32(38, 0, true); // External file attributes
+                cdView.setUint32(42, offset, true); // Relative offset of local header
+
+                centralHeader.set(fileName, 46);
+
+                centralDirectory.push(centralHeader);
+                offset += localHeader.length + fileData.length;
             }
+
+            // End of central directory record
+            const cdLength = centralDirectory.reduce((sum, cd) => sum + cd.length, 0);
+            const endOfCentralDir = new Uint8Array(22);
+            const eocdView = new DataView(endOfCentralDir.buffer);
+
+            eocdView.setUint32(0, 0x06054b50, true); // End of central dir signature
+            eocdView.setUint16(4, 0, true); // Number of this disk
+            eocdView.setUint16(6, 0, true); // Disk where central directory starts
+            eocdView.setUint16(8, files.length, true); // Number of central directory records on this disk
+            eocdView.setUint16(10, files.length, true); // Total number of central directory records
+            eocdView.setUint32(12, cdLength, true); // Size of central directory
+            eocdView.setUint32(16, offset, true); // Offset of start of central directory
+            eocdView.setUint16(20, 0, true); // ZIP file comment length
+
+            // Combine all parts
+            const allParts = [...zipParts, ...centralDirectory, endOfCentralDir];
+            const zipBlob = new Blob(allParts, { type: 'application/zip' });
+
+            // Download
+            const link = document.createElement('a');
+            link.download = zipName;
+            link.href = URL.createObjectURL(zipBlob);
+            link.click();
+            URL.revokeObjectURL(link.href);
+        }
+
+        function crc32(data) {
+            // CRC32 lookup table
+            const table = new Uint32Array(256);
+            for (let i = 0; i < 256; i++) {
+                let c = i;
+                for (let j = 0; j < 8; j++) {
+                    c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+                }
+                table[i] = c;
+            }
+
+            let crc = 0xFFFFFFFF;
+            for (let i = 0; i < data.length; i++) {
+                crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
+            }
+            return (crc ^ 0xFFFFFFFF) >>> 0;
         }
 
         // ===== BATCH PROCESSING =====
