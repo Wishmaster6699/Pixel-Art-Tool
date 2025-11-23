@@ -90,48 +90,107 @@ function analyzeImage(imageData) {
 #### 1.2 Resolution Alignment Solver
 **Purpose:** Fix the "missing 2-3 pixels" problem when Gemini generates larger images
 
-**Problem:**
-- User provides 64x64 reference to Gemini
-- Gemini generates 192x256 (roughly 3x larger)
-- Scaling down in Aseprite results in 2-3 pixel rows/columns missing
+**The Real Problem Explained:**
+When users provide a 64x64 reference sprite to Gemini and ask for variations, Gemini often generates images at ~2-3x larger resolution (e.g., 192x256). When scaling back down, the result has alignment issues:
 
-**Root Cause:**
-- Non-integer scaling ratios (e.g., 192/64 = 3.0, but 256/64 = 4.0)
-- Uneven dimensions that don't divide cleanly
+```
+Original Reference (64x64):
+┌────────────────┐
+│                │
+│    🧙‍♂️ wizard   │  ← Subject centered, fits perfectly
+│                │
+└────────────────┘
 
-**Solution Approach:**
+Gemini Generates (~192x256):
+┌──────────────────────────────┐
+│                              │
+│        🧙‍♂️ wizard but        │  ← Subject slightly off-center
+│        different pose        │     and slightly different size
+│                              │
+└──────────────────────────────┘
 
-**Method 1: Smart Crop/Pad**
+After Scaling Down:
+┌────────────────┐
+│░│            │░│  ← Gap on left/right (width off by 2-3 pixels)
+│░│  🧙‍♂️ wizard │░│     Empty pixel columns on edges
+│░│            │░│
+└────────────────┘
+```
+
+**Root Causes:**
+1. **Non-integer scaling ratios** (e.g., 192/64 = 3.0, but 256/64 = 4.0)
+2. **Subject size mismatch** - AI character is slightly larger/smaller than reference
+3. **Subject positioning** - AI character is slightly off-center
+4. **Content doesn't align to grid** - character boundaries don't match pixel grid
+
+**Solution Approaches:**
+
+**Method 1: Content-Aware Scaling**
 ```javascript
-function alignToTarget(sourceImage, targetWidth, targetHeight) {
-  // Calculate how much to crop or pad
-  const currentRatio = sourceImage.width / sourceImage.height;
-  const targetRatio = targetWidth / targetHeight;
+function contentAwareAlignment(aiImage, referenceImage, targetSize) {
+  // 1. Auto-crop AI image to just the character (remove empty space)
+  const aiCropped = autoCropToContent(aiImage);
 
-  // If source is wider than target ratio, crop width
-  // If source is taller than target ratio, crop height
+  // 2. Detect character bounds in reference
+  const refBounds = detectContentBounds(referenceImage);
 
-  // Crop from center to maintain subject
-  // Then scale to exact target dimensions
+  // 3. Scale AI character to match reference character size
+  const scaleFactor = refBounds.width / aiCropped.width;
+  const aiScaled = scaleImage(aiCropped, scaleFactor);
+
+  // 4. Center within target canvas (or align bottom-center for standing sprites)
+  const aligned = centerOnCanvas(aiScaled, targetSize.width, targetSize.height);
+
+  // 5. Result: perfectly aligned, no edge gaps
+  return aligned;
 }
 ```
 
-**Method 2: Integer Scale Detection**
+**Method 2: Integer Scale Detection with Smart Crop**
 ```javascript
 function findBestIntegerScale(sourceWidth, sourceHeight, targetWidth, targetHeight) {
   // Try scale factors: 2x, 3x, 4x, 5x
   // Find which gives closest match
   // Suggest pre-crop dimensions that will scale perfectly
 
-  // Example: 192x256 → suggest crop to 192x192 → scale to 64x64
+  // Example: 192x256 → detect width is 2-3 pixels too narrow
+  // Suggest: "Crop to 192x192 for perfect 3x → 1x scaling"
+  // Or: "Add 64px width padding for 4x → 1x scaling"
+}
+```
+
+**Method 3: Width/Height Fix Tool**
+```javascript
+function fixDimensionMismatch(image, targetWidth, targetHeight) {
+  // Detect which dimension is off
+  const widthRatio = image.width / targetWidth;
+  const heightRatio = image.height / targetHeight;
+
+  // If width is slightly narrow (common issue):
+  // - Add padding to sides (centered or custom alignment)
+  // - Or crop height to match width ratio
+
+  // If height is off:
+  // - Similar padding/crop logic
 }
 ```
 
 **UI Features:**
-- **"Target Resolution" input** - user enters desired final size
-- **Alignment Preview** - shows what will be cropped/padded
-- **Center/Top/Bottom/Left/Right crop options**
-- **"Fix Alignment" button** - applies smart crop before processing
+- **"Target Resolution" input** - user enters desired final size (e.g., 64x64)
+- **Alignment Mode:**
+  - "Auto-detect Content" (finds character, scales to match)
+  - "Integer Scale" (suggests clean crop/pad for perfect scaling)
+  - "Manual Crop/Pad" (user specifies offsets)
+- **Alignment Preview** - shows what will be cropped/padded with overlay
+- **Positioning options:**
+  - Center (equal padding all sides)
+  - Bottom-center (for character sprites with feet on ground)
+  - Top-left, Top-right, etc.
+  - Custom X/Y offsets
+- **"Fix Alignment" button** - applies smart crop/pad before processing
+- **Live statistics:**
+  - "Width: 62px (need 64px) - adding 1px left, 1px right"
+  - "Height: 67px (need 64px) - cropping 2px top, 1px bottom"
 
 **Reference Research:**
 - [Integer scaling for pixel-perfect results](https://tanalin.com/en/articles/integer-scaling/)
@@ -460,6 +519,382 @@ function reassembleSpriteSheet(frames, layout, padding) {
 
 ---
 
+#### 3.4 Sprite Sheet Slicer & Aseprite Export ⭐ HIGH VALUE
+**Purpose:** Slice sprite sheets into individual frames with Aseprite-compatible naming for seamless animation import
+
+**Use Case:**
+User creates reference animation sprite sheet in Aseprite (e.g., 6x8 grid = 48 frames of run animation). They need to:
+1. Upload the sprite sheet
+2. Automatically slice it into 48 individual PNGs
+3. Export with sequential naming that Aseprite recognizes
+4. Drag-and-drop into Aseprite for instant animation playback
+
+**Aseprite Sequential Import Naming Convention:**
+According to [Aseprite documentation](https://www.aseprite.org/docs/exporting/) and [community forums](https://community.aseprite.org/t/question-about-importing-pngs-for-animation/7937), Aseprite auto-detects sequential files with this pattern:
+
+```
+basename1.png, basename2.png, basename3.png, ...
+```
+
+**Examples:**
+- `wizard_run_1.png`, `wizard_run_2.png`, `wizard_run_3.png` ✅
+- `walk_001.png`, `walk_002.png`, `walk_003.png` ✅
+- `attack_01.png`, `attack_02.png`, `attack_03.png` ✅
+
+When opening the first file, Aseprite prompts: **"Open a sequence of static files as an animation?"** and automatically imports all matching files as frames in order.
+
+**Core Algorithm:**
+```javascript
+function sliceSpriteSheet(spriteSheet, config) {
+  const { cols, rows, baseName, startNumber, padding, readOrder } = config;
+
+  const frameWidth = spriteSheet.width / cols;
+  const frameHeight = spriteSheet.height / rows;
+
+  const frames = [];
+  let frameNumber = startNumber;
+
+  // Determine slice order
+  const coordinates = generateSliceOrder(cols, rows, readOrder);
+
+  // Slice each frame
+  for (const [col, row] of coordinates) {
+    // Extract this frame
+    const frame = extractRegion(
+      spriteSheet,
+      col * frameWidth,
+      row * frameHeight,
+      frameWidth,
+      frameHeight
+    );
+
+    // Create filename with padding
+    const paddedNumber = padNumber(frameNumber, padding);
+    const filename = `${baseName}${paddedNumber}.png`;
+
+    frames.push({ filename, imageData: frame });
+    frameNumber++;
+  }
+
+  // Create ZIP and download
+  return createZipDownload(frames, `${baseName}.zip`);
+}
+```
+
+**Read Order Options:**
+```javascript
+function generateSliceOrder(cols, rows, readOrder) {
+  const coordinates = [];
+
+  switch(readOrder) {
+    case 'row-major': // Left-to-right, top-to-bottom (DEFAULT)
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          coordinates.push([col, row]);
+        }
+      }
+      break;
+
+    case 'column-major': // Top-to-bottom, left-to-right
+      for (let col = 0; col < cols; col++) {
+        for (let row = 0; row < rows; row++) {
+          coordinates.push([col, row]);
+        }
+      }
+      break;
+
+    case 'custom': // User-defined sequence
+      // User can click frames in desired order
+      // Or provide array of indices
+      coordinates = customSequence;
+      break;
+  }
+
+  return coordinates;
+}
+```
+
+**Read Order Visualization:**
+```
+Row-Major (default):        Column-Major:           Custom:
+1  2  3  4  5  6            1  7  13 19 25 31      User defines order
+7  8  9  10 11 12           2  8  14 20 26 32      by clicking frames
+13 14 15 16 17 18           3  9  15 21 27 33      in UI preview
+19 20 21 22 23 24           4  10 16 22 28 34
+25 26 27 28 29 30           5  11 17 23 29 35
+31 32 33 34 35 36           6  12 18 24 30 36
+37 38 39 40 41 42
+43 44 45 46 47 48
+```
+
+**Padding Options:**
+```javascript
+function padNumber(num, paddingType) {
+  switch(paddingType) {
+    case 'none':
+      return num.toString(); // "1", "2", "3", ...
+    case '2-digit':
+      return num.toString().padStart(2, '0'); // "01", "02", "03", ...
+    case '3-digit':
+      return num.toString().padStart(3, '0'); // "001", "002", "003", ...
+    case '4-digit':
+      return num.toString().padStart(4, '0'); // "0001", "0002", "0003", ...
+    default:
+      return num.toString();
+  }
+}
+```
+
+**Grid Auto-Detection:**
+```javascript
+function autoDetectGridSize(spriteSheet) {
+  // Common sprite sizes
+  const commonSizes = [8, 16, 24, 32, 48, 64, 96, 128, 192, 256];
+
+  // Find factors of image dimensions
+  const widthFactors = findFactors(spriteSheet.width, commonSizes);
+  const heightFactors = findFactors(spriteSheet.height, commonSizes);
+
+  // Suggest most likely grid
+  // E.g., 384x512 sprite sheet:
+  //   Width: 384 = 6 × 64 or 12 × 32
+  //   Height: 512 = 8 × 64 or 16 × 32
+  //   Suggest: 6 cols × 8 rows (64px frames)
+
+  return {
+    suggested: { cols: 6, rows: 8, frameSize: 64 },
+    alternatives: [
+      { cols: 12, rows: 16, frameSize: 32 },
+      { cols: 3, rows: 4, frameSize: 128 }
+    ]
+  };
+}
+```
+
+**UI Design:**
+```
+┌─────────────────────────────────────────────────────────┐
+│  SPRITE SHEET SLICER                                    │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  Upload Sprite Sheet: [Choose File]                    │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  GRID DETECTION                                 │   │
+│  │  Image Size: 384 x 512                          │   │
+│  │                                                 │   │
+│  │  ✓ Detected: 6 cols × 8 rows = 48 frames       │   │
+│  │    Frame Size: 64x64 pixels                     │   │
+│  │                                                 │   │
+│  │  Other options:                                 │   │
+│  │  • 12 cols × 16 rows (32x32 frames)            │   │
+│  │  • 3 cols × 4 rows (128x128 frames)            │   │
+│  │                                                 │   │
+│  │  Or enter manually:                             │   │
+│  │  Columns: [6]  Rows: [8]                        │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  FRAME NAMING                                   │   │
+│  │  Base Name: [wizard_run_]                       │   │
+│  │  Start Number: [1]                              │   │
+│  │  Padding: [None ▼]                              │   │
+│  │    • None → wizard_run_1.png                    │   │
+│  │    • 2-digit → wizard_run_01.png                │   │
+│  │    • 3-digit → wizard_run_001.png               │   │
+│  │    • 4-digit → wizard_run_0001.png              │   │
+│  │                                                 │   │
+│  │  Preview:                                       │   │
+│  │  wizard_run_1.png                               │   │
+│  │  wizard_run_2.png                               │   │
+│  │  ...                                            │   │
+│  │  wizard_run_48.png                              │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  READ ORDER                                     │   │
+│  │  ○ Row-Major (left→right, top→bottom) DEFAULT   │   │
+│  │  ○ Column-Major (top→bottom, left→right)        │   │
+│  │  ○ Custom Sequence (click frames to define)     │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  PREVIEW WITH GRID OVERLAY                      │   │
+│  │  [Show Grid] [Highlight Frame #: 1]             │   │
+│  │                                                 │   │
+│  │  ┌───────────────────────────────────────┐      │   │
+│  │  │ [Sprite sheet with grid lines drawn]  │      │   │
+│  │  │ [Frame numbers shown in each cell]    │      │   │
+│  │  │ [Currently highlighted frame in color]│      │   │
+│  │  └───────────────────────────────────────┘      │   │
+│  │                                                 │   │
+│  │  Grid Color: [Yellow ▼]  Opacity: 70%           │   │
+│  │  Number Labels: [Show ☑]  Font Size: 12px      │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                         │
+│  [Slice & Download as ZIP]  [Download Individual]      │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Preview Grid Overlay Implementation:**
+```javascript
+function drawGridOverlay(canvas, cols, rows, config) {
+  const ctx = canvas.getContext('2d');
+  const frameWidth = canvas.width / cols;
+  const frameHeight = canvas.height / rows;
+
+  // Draw grid lines
+  ctx.strokeStyle = config.gridColor;
+  ctx.globalAlpha = config.opacity;
+  ctx.lineWidth = 2;
+
+  // Vertical lines
+  for (let i = 0; i <= cols; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * frameWidth, 0);
+    ctx.lineTo(i * frameWidth, canvas.height);
+    ctx.stroke();
+  }
+
+  // Horizontal lines
+  for (let i = 0; i <= rows; i++) {
+    ctx.beginPath();
+    ctx.moveTo(0, i * frameHeight);
+    ctx.lineTo(canvas.width, i * frameHeight);
+    ctx.stroke();
+  }
+
+  // Draw frame numbers
+  if (config.showNumbers) {
+    ctx.globalAlpha = 1.0;
+    ctx.fillStyle = config.gridColor;
+    ctx.font = `${config.fontSize}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    let frameNum = 1;
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const x = col * frameWidth + frameWidth / 2;
+        const y = row * frameHeight + frameHeight / 2;
+        ctx.fillText(frameNum.toString(), x, y);
+        frameNum++;
+      }
+    }
+  }
+
+  // Highlight selected frame
+  if (config.highlightFrame !== null) {
+    const [col, row] = getFramePosition(config.highlightFrame, cols, rows);
+    ctx.strokeStyle = '#00FF00'; // Bright green
+    ctx.lineWidth = 4;
+    ctx.strokeRect(
+      col * frameWidth,
+      row * frameHeight,
+      frameWidth,
+      frameHeight
+    );
+  }
+}
+```
+
+**Custom Sequence Builder:**
+```javascript
+function enableCustomSequence(canvas, cols, rows) {
+  const clickedFrames = [];
+
+  canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const frameWidth = canvas.width / cols;
+    const frameHeight = canvas.height / rows;
+
+    const col = Math.floor(x / frameWidth);
+    const row = Math.floor(y / frameHeight);
+
+    // Add to sequence
+    clickedFrames.push([col, row]);
+
+    // Update UI to show sequence number in that frame
+    updateSequenceDisplay(clickedFrames);
+  });
+
+  // Reset button clears sequence
+  resetButton.addEventListener('click', () => {
+    clickedFrames = [];
+    updateSequenceDisplay(clickedFrames);
+  });
+}
+```
+
+**ZIP Creation and Download:**
+```javascript
+async function createZipDownload(frames, zipName) {
+  // Using JSZip library pattern (but implemented in vanilla JS)
+  // Or use browser-native approach with File API
+
+  const zip = new JSZip(); // Pseudo-code
+
+  frames.forEach(({ filename, imageData }) => {
+    // Convert canvas imageData to PNG blob
+    const blob = canvasToPNGBlob(imageData);
+    zip.file(filename, blob);
+  });
+
+  // Generate ZIP
+  const zipBlob = await zip.generateAsync({ type: 'blob' });
+
+  // Trigger download
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(zipBlob);
+  link.download = zipName;
+  link.click();
+}
+```
+
+**Key Features Summary:**
+- ✅ **Grid auto-detection** - suggests optimal grid layout
+- ✅ **Multiple padding options** - none, 2-digit, 3-digit, 4-digit
+- ✅ **Three read orders** - row-major (default), column-major, custom
+- ✅ **Visual grid overlay** - verify slicing before export
+- ✅ **Frame number labels** - see exactly which frame is which
+- ✅ **Highlight preview** - hover/select individual frames
+- ✅ **Custom sequence** - click frames in desired order
+- ✅ **Aseprite-compatible naming** - instant animation import
+- ✅ **ZIP export** - all frames in one download
+- ✅ **Individual frame download** - optional
+
+**Workflow Example:**
+```
+1. User creates 6×8 sprite sheet in Aseprite (wizard run animation)
+2. Uploads to tool
+3. Tool detects: "6 cols × 8 rows = 48 frames of 64×64px"
+4. User enters: "wizard_run_" as base name
+5. Selects: "3-digit padding", "Row-Major order"
+6. Preview shows grid with frame numbers 001-048
+7. Clicks "Slice & Download as ZIP"
+8. Downloads: wizard_run.zip containing wizard_run_001.png through wizard_run_048.png
+9. In Aseprite: File → Open → wizard_run_001.png
+10. Aseprite prompts: "Open sequence as animation?"
+11. Clicks "Yes"
+12. All 48 frames load in correct order → instant playable animation
+```
+
+**Integration with Other Features:**
+- Can process frames BEFORE slicing (apply grid quantization, color reduction to whole sheet)
+- Can slice THEN process individual frames (batch processing with palette consistency)
+- Can reassemble after processing (slice → clean → reassemble)
+
+**Reference Research:**
+- [Aseprite Sequential Import](https://community.aseprite.org/t/question-about-importing-pngs-for-animation/7937)
+- [Aseprite Exporting Documentation](https://www.aseprite.org/docs/exporting/)
+- [Aseprite Animation Documentation](https://www.aseprite.org/docs/animation/)
+
+---
+
 ### **PHASE 4: Advanced Processing Tools**
 
 #### 4.1 Auto-Crop to Content
@@ -779,6 +1214,7 @@ pixel-art-quantizer.html
 | Resolution Alignment | HIGH | Medium | High |
 | Background Removal | HIGH | Medium | Critical |
 | K-Means Quantization | HIGH | High | Critical |
+| Sprite Sheet Slicer | HIGH | Medium | Critical |
 | Batch Processing | HIGH | Medium | High |
 
 ### Phase 2 - Should Have (v2.5)
@@ -787,7 +1223,8 @@ pixel-art-quantizer.html
 | Palette Import/Export | MEDIUM | Low | High |
 | Preset Palettes | MEDIUM | Low | Medium |
 | Auto-Crop | MEDIUM | Low | Medium |
-| Sprite Sheet Split/Join | MEDIUM | Medium | High |
+| Sprite Sheet Split (basic) | MEDIUM | Medium | High |
+| Sprite Sheet Reassembly | MEDIUM | Medium | High |
 
 ### Phase 3 - Nice to Have (v3.0)
 | Feature | Priority | Effort | Value |
@@ -946,21 +1383,23 @@ pixel-art-quantizer.html
 ### Version 2.0 (Next Major Release)
 **Target Features:**
 - Image analysis on import
-- Resolution alignment solver
-- Background removal (chroma key + checkerboard)
+- Resolution alignment solver (content-aware scaling)
+- Background removal (chroma key + checkerboard + magic cut)
 - K-means color quantization
+- **Sprite Sheet Slicer with Aseprite export** (NEW)
 - Batch processing (basic)
 
-**Estimated Effort:** 3-4 weeks of development
+**Estimated Effort:** 4-5 weeks of development
 
 ### Version 2.5
 **Target Features:**
 - Palette import/export
 - Preset retro palettes
-- Sprite sheet split/join
+- Sprite sheet reassembly
 - Auto-crop to content
+- Advanced slicer features (custom sequence, grid overlay)
 
-**Estimated Effort:** 2 weeks
+**Estimated Effort:** 2-3 weeks
 
 ### Version 3.0
 **Target Features:**
@@ -1068,5 +1507,26 @@ This project aims to solve a real workflow problem: converting AI-generated imag
 
 ---
 
+## 📋 Update Log
+
+**v1.1 - 2025-11-23**
+- Added comprehensive Resolution Alignment Solver with content-aware scaling
+- Added Sprite Sheet Slicer & Aseprite Export feature (Phase 3.4)
+- Included all optional slicer features:
+  - Padding options (none, 2-digit, 3-digit, 4-digit)
+  - Grid auto-detection
+  - Custom read order (row-major, column-major, custom sequence)
+  - Preview grid overlay with frame numbers
+- Updated priority matrix to include Sprite Sheet Slicer as HIGH priority
+- Updated roadmap with revised time estimates
+- Documented Aseprite sequential naming convention
+
+**v1.0 - 2025-11-23**
+- Initial planning document
+- Defined 6 development phases
+- Documented core features and algorithms
+
+---
+
 *Last Updated: 2025-11-23*
-*Version: Planning Document v1.0*
+*Version: Planning Document v1.1*
